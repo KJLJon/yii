@@ -25,6 +25,22 @@
 class CDbAuthManager extends CAuthManager
 {
 	/**
+	 * @var bool if it should cache the results.  Defaults to false
+	 */
+	public $cacheItems=false;
+	/**
+	 * @var string the ID of the {@link CCache} application component. Defaults to 'cache'.
+	 */
+	public $cacheID='cache';
+	/**
+	 * @var string cache key
+	 */
+	public $cacheKey='system.web.auth.CDbAuthManager.';
+	/**
+	 * @var int the length of the cache in seconds.  Defaults to 86400 (1 day).
+	 */
+	public $cacheDuration=86400;
+	/**
 	 * @var string the ID of the {@link CDbConnection} application component. Defaults to 'db'.
 	 * The database must have the tables as declared in "framework/web/auth/*.sql".
 	 */
@@ -48,6 +64,8 @@ class CDbAuthManager extends CAuthManager
 	public $db;
 
 	private $_usingSqlite;
+
+	private $_cache;
 
 	/**
 	 * Initializes the application component.
@@ -105,11 +123,7 @@ class CDbAuthManager extends CAuthManager
 				if($this->executeBizRule($assignment->getBizRule(),$params,$assignment->getData()))
 					return true;
 			}
-			$parents=$this->db->createCommand()
-				->select('parent')
-				->from($this->itemChildTable)
-				->where('child=:name', array(':name'=>$itemName))
-				->queryColumn();
+			$parents=$this->getItemParents($itemName);
 			foreach($parents as $parent)
 			{
 				if($this->checkAccessRecursive($parent,$userId,$params,$assignments))
@@ -117,6 +131,120 @@ class CDbAuthManager extends CAuthManager
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Gets the item's parents
+	 * @param $itemName
+	 * @return array
+	 */
+	public function getItemParents($itemName)
+	{
+		if($this->cacheItems===true)
+		{
+			$items=$this->getCached($this->itemChildTable);
+			return isset($items[$itemName]['parents'])?$items[$itemName]['parents']:array();
+		}
+		else
+		{
+			return $this->db->createCommand()
+				->select('parent')
+				->from($this->itemChildTable)
+				->where('child=:name', array(':name'=>$itemName))
+				->queryColumn();
+		}
+	}
+
+	/**
+	 * @param string table name
+	 * @return string cache key
+	 */
+	protected function getCacheKey($table)
+	{
+		return $this->cacheKey . $table;
+	}
+
+	/**
+	 * @return array cached items
+	 */
+	protected function getCached($table)
+	{
+		$cached = $this->cache->get($this->getCacheKey($table));
+		if($cached!==false)
+			return $cached;
+		
+		$results=$this->db->createCommand()
+			->select()
+			->from($table)
+			->queryAll();
+			
+		$items=array();
+		if($table===$this->itemTable)
+		{
+			foreach($results as $item)
+				$items[$item['name']] = $item;
+		}
+		elseif($table===$this->itemChildTable)
+		{
+			foreach($results as $item)
+			{
+				$items[$item['child']]['parents'][]=$item['parent'];
+				$items[$item['parent']]['children'][]=$item['child'];
+			}
+		}
+		$this->cache->set($this->getCacheKey($table),$items,$this->cacheDuration);
+		return $items;
+	}
+
+	/**
+	 * @return ICache the cache used for caching the content.
+	 */
+	protected function getCache()
+	{
+		return Yii::app()->getComponent($this->cacheID);
+	}
+
+	/**
+	 * @param array|$itemName1,$itemName2,...,$itemName3 a list of item names
+	 * @return array list of items
+	 */
+	public function getItems()
+	{
+		$args=func_get_args();
+		$numbArgs=func_num_args();
+		if($numbArgs===0)
+			return array();
+		elseif($numbArgs===1&&is_array($args[0]))
+			$args = $args[0];
+		$items=array();
+		if($this->cacheItems===true)
+		{
+			$cachedItems=$this->getCached($this->itemTable);
+			foreach($args as $arg)
+				if(isset($cachedItems[$arg]))
+					$items[]=$cachedItems[$arg];
+		}
+		else
+		{
+			$params=array();
+			$where=array();
+			
+			if($numbArgs>1)
+				$where[]='OR';
+			
+			foreach(func_get_args() as $i=>$arg)
+			{
+				$where[]='name=:y'.$i;
+				$params[':y'.$i]=$arg;
+			}
+			
+			$items = $this->db->createCommand()
+				->select()
+				->from($this->itemTable)
+				->where($where,$params)
+				->queryAll();
+		}
+		return $items;
 	}
 
 	/**
@@ -132,14 +260,7 @@ class CDbAuthManager extends CAuthManager
 			throw new CException(Yii::t('yii','Cannot add "{name}" as a child of itself.',
 					array('{name}'=>$itemName)));
 
-		$rows=$this->db->createCommand()
-			->select()
-			->from($this->itemTable)
-			->where('name=:name1 OR name=:name2', array(
-				':name1'=>$itemName,
-				':name2'=>$childName
-			))
-			->queryAll();
+		$rows=$this->getItems($itemName,$childName);
 
 		if(count($rows)==2)
 		{
@@ -158,6 +279,7 @@ class CDbAuthManager extends CAuthManager
 				throw new CException(Yii::t('yii','Cannot add "{child}" as a child of "{name}". A loop has been detected.',
 					array('{child}'=>$childName,'{name}'=>$itemName)));
 
+			$this->clearCache($this->itemChildTable);
 			$this->db->createCommand()
 				->insert($this->itemChildTable, array(
 					'parent'=>$itemName,
@@ -171,6 +293,16 @@ class CDbAuthManager extends CAuthManager
 	}
 
 	/**
+	 * Clears the table cache
+	 * @param string $table table name
+	 */
+	public function clearCache($table)
+	{
+		if($this->cacheItems===true)
+			$this->cache->delete($this->getCacheKey($table));
+	}
+
+	/**
 	 * Removes a child from its parent.
 	 * Note, the child item is not deleted. Only the parent-child relationship is removed.
 	 * @param string $itemName the parent item name
@@ -179,6 +311,7 @@ class CDbAuthManager extends CAuthManager
 	 */
 	public function removeItemChild($itemName,$childName)
 	{
+		$this->clearCache($this->itemChildTable);
 		return $this->db->createCommand()
 			->delete($this->itemChildTable, 'parent=:parent AND child=:child', array(
 				':parent'=>$itemName,
@@ -194,13 +327,21 @@ class CDbAuthManager extends CAuthManager
 	 */
 	public function hasItemChild($itemName,$childName)
 	{
-		return $this->db->createCommand()
-			->select('parent')
-			->from($this->itemChildTable)
-			->where('parent=:parent AND child=:child', array(
-				':parent'=>$itemName,
-				':child'=>$childName))
-			->queryScalar() !== false;
+		if($this->cacheItems === true)
+		{
+			$items=$this->getCached($this->itemChildTable);
+			if(isset($items[$itemName]['children'])===false)
+				return false;
+			return in_array($childName,$items[$itemName]['children']);
+		}
+		else
+			return $this->db->createCommand()
+				->select('parent')
+				->from($this->itemChildTable)
+				->where('parent=:parent AND child=:child', array(
+					':parent'=>$itemName,
+					':child'=>$childName))
+				->queryScalar() !== false;
 	}
 
 	/**
@@ -211,23 +352,36 @@ class CDbAuthManager extends CAuthManager
 	 */
 	public function getItemChildren($names)
 	{
-		if(is_string($names))
-			$condition='parent='.$this->db->quoteValue($names);
-		elseif(is_array($names) && $names!==array())
+		if($this->cacheItems===true)
 		{
-			foreach($names as &$name)
-				$name=$this->db->quoteValue($name);
-			$condition='parent IN ('.implode(', ',$names).')';
+			$items = $this->getCached($this->itemChildTable);
+			$childList = array();
+			foreach((array)$names as $item)
+				if(isset($items[$item]['children']))
+					$childList=array_merge($childList, $items[$item]['children']);
+			$childList=array_unique($childList);
+			$rows=$this->getItems($childList);
 		}
+		else
+		{
+			if(is_string($names))
+				$condition='parent='.$this->db->quoteValue($names);
+			elseif(is_array($names) && $names!==array())
+			{
+				foreach($names as &$name)
+					$name=$this->db->quoteValue($name);
+				$condition='parent IN ('.implode(', ',$names).')';
+			}
 
-		$rows=$this->db->createCommand()
-			->select('name, type, description, bizrule, data')
-			->from(array(
-				$this->itemTable,
-				$this->itemChildTable
-			))
-			->where($condition.' AND name=child')
-			->queryAll();
+			$rows=$this->db->createCommand()
+				->select('name, type, description, bizrule, data')
+				->from(array(
+					$this->itemTable,
+					$this->itemChildTable
+				))
+				->where($condition.' AND name=child')
+				->queryAll();
+		}
 
 		$children=array();
 		foreach($rows as $row)
@@ -434,6 +588,7 @@ class CDbAuthManager extends CAuthManager
 	 */
 	public function createAuthItem($name,$type,$description='',$bizRule=null,$data=null)
 	{
+		$this->clearCache($this->itemTable);
 		$this->db->createCommand()
 			->insert($this->itemTable, array(
 				'name'=>$name,
@@ -465,6 +620,7 @@ class CDbAuthManager extends CAuthManager
 			));
 		}
 
+		$this->clearCache($this->itemTable);
 		return $this->db->createCommand()
 			->delete($this->itemTable, 'name=:name', array(
 				':name'=>$name
@@ -478,11 +634,22 @@ class CDbAuthManager extends CAuthManager
 	 */
 	public function getAuthItem($name)
 	{
-		$row=$this->db->createCommand()
-			->select()
-			->from($this->itemTable)
-			->where('name=:name', array(':name'=>$name))
-			->queryRow();
+		if($this->cacheItems===true)
+		{
+			$items = $this->getItems($name);
+			if(isset($items[0]))
+				$row = $items[0];
+			else
+				$row = false;
+		}
+		else
+		{
+			$row=$this->db->createCommand()
+				->select()
+				->from($this->itemTable)
+				->where('name=:name', array(':name'=>$name))
+				->queryRow();
+		}
 
 		if($row!==false)
 		{
@@ -523,6 +690,7 @@ class CDbAuthManager extends CAuthManager
 				));
 		}
 
+		$this->clearCache($this->itemTable);
 		$this->db->createCommand()
 			->update($this->itemTable, array(
 				'name'=>$item->getName(),
@@ -547,6 +715,8 @@ class CDbAuthManager extends CAuthManager
 	 */
 	public function clearAll()
 	{
+		$this->clearCache($this->itemTable);
+		$this->clearCache($this->itemChildTable);
 		$this->clearAuthAssignments();
 		$this->db->createCommand()->delete($this->itemChildTable);
 		$this->db->createCommand()->delete($this->itemTable);
