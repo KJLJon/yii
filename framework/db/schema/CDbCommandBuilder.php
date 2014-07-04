@@ -780,16 +780,22 @@ class CDbCommandBuilder extends CComponent
 			$column=$table->columns[$columnName];
 
 			$values=array_values($values);
-			foreach($values as &$value)
+			$hasNullValue=false;
+			foreach($values as $index=>&$value)
 			{
 				$value=$column->typecast($value);
-				if(is_string($value))
+				if($value===null)
+				{
+					$hasNullValue=true;
+					unset($values[$index]);
+				}
+				elseif(is_string($value))
 					$value=$db->quoteValue($value);
 			}
 			if($n===1)
-				return $prefix.$column->rawName.($values[0]===null?' IS NULL':'='.$values[0]);
+				return $prefix.$column->rawName.($hasNullValue?' IS NULL':'='.$values[0]);
 			else
-				return $prefix.$column->rawName.' IN ('.implode(', ',$values).')';
+				return '('.$prefix.$column->rawName.' IN ('.implode(', ',$values).')'.' OR '.$prefix.$column->rawName.' IS NULL)';
 		}
 		elseif(is_array($columnName)) // composite key: $values=array(array('pk1'=>'v1','pk2'=>'v2'),array(...))
 		{
