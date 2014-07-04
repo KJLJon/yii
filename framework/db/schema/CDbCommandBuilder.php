@@ -807,7 +807,7 @@ class CDbCommandBuilder extends CComponent
 
 				for($i=0;$i<$n;++$i)
 				{
-					if(isset($values[$i][$name]))
+					if(array_key_exists($name,$values[$i]))
 					{
 						$value=$table->columns[$name]->typecast($values[$i][$name]);
 						if(is_string($value))
